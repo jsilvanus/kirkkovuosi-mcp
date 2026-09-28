@@ -1,0 +1,2 @@
+# kirkkovuosi-mcp
+Kirkkovuosikalenteri MCP
