@@ -1,6 +1,7 @@
 import { hash } from '@node-rs/argon2';
 import { buildApp } from './app.js';
 import { SqliteAuthStore, SqliteUserStore } from './storage/sqlite.js';
+import { parseOidcConfig } from './oidc/config.js';
 
 const port = Number(process.env.PORT ?? '5999');
 const publicUrl = process.env.MCP_PUBLIC_URL ?? ('http://localhost:' + port);
@@ -14,6 +15,9 @@ if (!defaultUserPassword) throw new Error('MCP_DEFAULT_USER_PASSWORD is required
 const secret = Buffer.from(secretText, 'base64');
 if (secret.length < 32) throw new Error('JWT_SECRET must decode to at least 32 bytes');
 
+// OIDC sign-in is optional; invalid settings stop the server here, before anything listens
+const oidc = parseOidcConfig(process.env);
+
 const storagePath = process.env.STORAGE_PATH ?? './data/app.sqlite';
 const store = new SqliteAuthStore(storagePath);
 const users = new SqliteUserStore(store.getDatabase());
@@ -23,7 +27,7 @@ if (!users.getUser(defaultUserId)) {
   users.createUser({ id: defaultUserId, name: 'Demo User', email: defaultUserEmail, passwordHash: await hash(defaultUserPassword, { algorithm: 2 }), createdAt: Date.now() });
 }
 
-const app = await buildApp({ publicUrl, jwtSecret: secret, store, users });
+const app = await buildApp({ publicUrl, jwtSecret: secret, store, users, oidc });
 
 await app.listen({
   host: process.env.HOST ?? '0.0.0.0',

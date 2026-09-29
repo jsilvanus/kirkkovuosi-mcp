@@ -4,13 +4,17 @@ import { KirkkovuosikalenteriConnector } from './connector.js';
 import { mountMcpHttp } from './mcp/http.js';
 import { mountOAuthMetadata } from './oauth-metadata.js';
 import { mountAuthorizationServer, type AuthorizationServerOptions } from './oauth/authorization-server.js';
-import type { AuthStore, UserStore } from './storage/interface.js';
+import type { AuthStore, OidcStore, UserStore } from './storage/interface.js';
+import type { OidcConfig } from './oidc/config.js';
+import { mountOidcRelyingParty } from './oidc/relying-party.js';
 
 export interface AppOptions {
   publicUrl: string;
   jwtSecret: Uint8Array;
-  store: AuthStore;
+  store: AuthStore & OidcStore;
   users: UserStore;
+  /** OIDC sign-in (SSO) on the authorize page; undefined = off (no button, no /oidc routes). */
+  oidc?: OidcConfig | undefined;
   authorization?: AuthorizationServerOptions;
   logger?: boolean;
   /** Defaults to a connector for the live site; tests pass one with a stubbed fetch. */
@@ -24,7 +28,13 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 
   const resource = options.publicUrl + '/mcp';
   await mountOAuthMetadata(app, options.publicUrl);
-  await mountAuthorizationServer(app, options.publicUrl, resource, options.jwtSecret, options.store, options.users, options.authorization);
+  const flow = await mountAuthorizationServer(app, options.publicUrl, resource, options.jwtSecret, options.store, options.users, {
+    ...options.authorization,
+    ...(options.oidc ? { sso: { label: options.oidc.buttonLabel } } : {}),
+  });
+  if (options.oidc) {
+    await mountOidcRelyingParty(app, { config: options.oidc, publicUrl: options.publicUrl, store: options.store, users: options.users, flow });
+  }
   await mountMcpHttp(app, {
     connector: options.connector ?? new KirkkovuosikalenteriConnector(),
     publicUrl: options.publicUrl,

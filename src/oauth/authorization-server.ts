@@ -13,26 +13,37 @@ export type { CimdMetadata };
 export interface AuthorizationServerOptions {
   /** Resolves a CIMD client_id to its metadata. Replaceable in tests. */
   fetchClientMetadata?: (clientId: string) => Promise<CimdMetadata>;
+  /** Shows a single sign-on button (to `/oidc/login?oauth=…`) on the sign-in page. Set only when OIDC is configured. */
+  sso?: { label: string };
+}
+
+/** What the OIDC sign-in needs from the authorization server to continue a pending authorization request. */
+export interface AuthorizationFlow {
+  /** Decodes and validates an encoded authorization request exactly as `/oauth/authorize` does; throws if invalid. */
+  validateEncoded(oauth: string): Promise<{ query: Record<string,string|undefined>; metadata: CimdMetadata }>;
+  /** Shows the consent step a successful password sign-in reaches, for `user`. */
+  showConsent(reply: FastifyReply, oauth: string, user: McpUser): Promise<unknown>;
 }
 
 const LOGIN_TICKET_TTL = '10m';
 
-function escapeHtml(value: string): string {
+export function escapeHtml(value: string): string {
   return value.replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;').replaceAll("'","&#39;");
 }
 
-function page(title: string, body: string): string {
+export function page(title: string, body: string): string {
   return '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>' +
     escapeHtml(title) +
-    '</title><style>body{font-family:system-ui,sans-serif;background:#f6f7f9;margin:0;padding:4rem 1rem}main{max-width:420px;margin:0 auto;background:#fff;padding:2rem;border-radius:12px;box-shadow:0 8px 30px rgba(0,0,0,.08)}h1{margin-top:0}label{display:block;margin:.9rem 0 .35rem}input{display:block;width:100%;box-sizing:border-box;padding:.7rem;border:1px solid #ccc;border-radius:7px}button{margin-top:1rem;padding:.7rem 1.1rem;border:0;border-radius:7px;cursor:pointer}.secondary{margin-left:.5rem;background:#eee}.error{color:#b00020}</style></head><body><main>' +
+    '</title><style>body{font-family:system-ui,sans-serif;background:#f6f7f9;margin:0;padding:4rem 1rem}main{max-width:420px;margin:0 auto;background:#fff;padding:2rem;border-radius:12px;box-shadow:0 8px 30px rgba(0,0,0,.08)}h1{margin-top:0}label{display:block;margin:.9rem 0 .35rem}input{display:block;width:100%;box-sizing:border-box;padding:.7rem;border:1px solid #ccc;border-radius:7px}button{margin-top:1rem;padding:.7rem 1.1rem;border:0;border-radius:7px;cursor:pointer}.secondary{margin-left:.5rem;background:#eee}.error{color:#b00020}.sso{display:block;text-align:center;margin:1rem 0;padding:.7rem 1.1rem;border-radius:7px;background:#1f4b99;color:#fff;text-decoration:none}.or{text-align:center;color:#666;margin:1rem 0 0}</style></head><body><main>' +
     body +
     '</main></body></html>';
 }
 
-function loginPage(oauth: string, error?: string): string {
+function loginPage(oauth: string, error?: string, sso?: { label: string }): string {
   return page('MCP sign in',
     '<h1>Sign in</h1><p>Sign in to authorize this MCP client to access the connector.</p>' +
     (error ? '<p class="error">' + escapeHtml(error) + '</p>' : '') +
+    (sso ? '<a class="sso" href="/oidc/login?oauth=' + encodeURIComponent(oauth) + '">' + escapeHtml(sso.label) + '</a><p class="or">or with email and password</p>' : '') +
     '<form method="post" action="/oauth/authorize">' +
     '<input type="hidden" name="oauth" value="' + escapeHtml(oauth) + '">' +
     '<label for="email">Email</label><input id="email" name="email" type="email" autocomplete="username" required autofocus>' +
@@ -51,15 +62,15 @@ function consentPage(oauth: string, ticket: string, userName: string, clientName
     '<button class="secondary" type="submit" name="action" value="deny">Deny</button></form>');
 }
 
-function encodeOAuth(query: Record<string,string|undefined>): string {
+export function encodeOAuth(query: Record<string,string|undefined>): string {
   return Buffer.from(new URLSearchParams(Object.entries(query).filter((entry): entry is [string,string] => typeof entry[1] === 'string')).toString()).toString('base64url');
 }
 
-function decodeOAuth(value: string): Record<string,string|undefined> {
+export function decodeOAuth(value: string): Record<string,string|undefined> {
   return Object.fromEntries(new URLSearchParams(Buffer.from(value,'base64url').toString('utf8')));
 }
 
-function sendHtml(reply: FastifyReply, html: string, formAction: string[] = [], status = 200) {
+export function sendHtml(reply: FastifyReply, html: string, formAction: string[] = [], status = 200) {
   return reply.code(status).header('Content-Security-Policy', contentSecurityPolicy(formAction)).header('Cache-Control', 'no-store').type('text/html').send(html);
 }
 
@@ -73,7 +84,7 @@ export async function mountAuthorizationServer(
   authStore: AuthStore,
   users: UserStore,
   options: AuthorizationServerOptions = {},
-): Promise<void> {
+): Promise<AuthorizationFlow> {
   const fetchClientMetadata = options.fetchClientMetadata ?? fetchCimdMetadata;
   const ticketAudience = issuer + '/oauth/authorize';
 
@@ -115,11 +126,13 @@ export async function mountAuthorizationServer(
     return sendHtml(reply, consentPage(oauth, ticket, user.name, metadata.client_name ?? q.client_id!), [redirectSource(q.redirect_uri!)]);
   }
 
+  const login = (oauth: string, error?: string) => loginPage(oauth, error, options.sso);
+
   app.get('/oauth/authorize', async (request, reply) => {
     const q = request.query as Record<string,string|undefined>;
     try {
       await validateRequest(q);
-      return sendHtml(reply, loginPage(encodeOAuth(q)));
+      return sendHtml(reply, login(encodeOAuth(q)));
     } catch {
       return sendHtml(reply, page('Invalid request','<h1>Invalid authorization request</h1>'), [], 400);
     }
@@ -144,11 +157,11 @@ export async function mountAuthorizationServer(
     // Step 1: sign in, then show consent with a login ticket
     if (body.action === undefined) {
       if (!body.email || !body.password) {
-        return sendHtml(reply, loginPage(oauth, 'Enter your email and password.'), [], 400);
+        return sendHtml(reply, login(oauth, 'Enter your email and password.'), [], 400);
       }
       const user = users.getUserByEmail(body.email);
       if (!user?.passwordHash || !(await verify(user.passwordHash, body.password))) {
-        return sendHtml(reply, loginPage(oauth, 'Invalid email or password.'), [], 401);
+        return sendHtml(reply, login(oauth, 'Invalid email or password.'), [], 401);
       }
       return showConsent(reply, oauth, q, metadata, user);
     }
@@ -156,7 +169,7 @@ export async function mountAuthorizationServer(
     // Step 2: consent decision, authenticated by the login ticket from step 1
     const user = body.ticket ? await verifyLoginTicket(body.ticket, oauth) : undefined;
     if (!user) {
-      return sendHtml(reply, loginPage(oauth, 'Your sign-in has expired. Please sign in again.'), [], 401);
+      return sendHtml(reply, login(oauth, 'Your sign-in has expired. Please sign in again.'), [], 401);
     }
 
     if (body.action !== 'approve') {
@@ -211,4 +224,16 @@ export async function mountAuthorizationServer(
 
     return reply.code(400).send({error:'unsupported_grant_type'});
   });
+
+  async function validateEncoded(oauth: string) {
+    const query = decodeOAuth(oauth);
+    return { query, metadata: await validateRequest(query) };
+  }
+  return {
+    validateEncoded,
+    async showConsent(reply: FastifyReply, oauth: string, user: McpUser) {
+      const { query, metadata } = await validateEncoded(oauth);
+      return showConsent(reply, oauth, query, metadata, user);
+    },
+  };
 }

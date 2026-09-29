@@ -1,9 +1,9 @@
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import type { AuthStore, AuthorizationCodeRecord, RefreshTokenRecord, McpUser, UserStore } from './interface.js';
+import type { AuthStore, AuthorizationCodeRecord, RefreshTokenRecord, McpUser, UserStore, OidcStateRecord, OidcStore } from './interface.js';
 
-export class SqliteAuthStore implements AuthStore {
+export class SqliteAuthStore implements AuthStore, OidcStore {
   private readonly db: DatabaseSync;
 
   constructor(path: string) {
@@ -12,7 +12,10 @@ export class SqliteAuthStore implements AuthStore {
     this.db.exec(
       'CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, name TEXT NOT NULL, email TEXT UNIQUE, password_hash TEXT, created_at INTEGER NOT NULL);' +
       'CREATE TABLE IF NOT EXISTS authorization_codes (code TEXT PRIMARY KEY, client_id TEXT NOT NULL, redirect_uri TEXT NOT NULL, challenge TEXT NOT NULL, subject TEXT NOT NULL, scope TEXT NOT NULL, expires INTEGER NOT NULL);' +
-      'CREATE TABLE IF NOT EXISTS refresh_tokens (token TEXT PRIMARY KEY, client_id TEXT NOT NULL, subject TEXT NOT NULL, scope TEXT NOT NULL, expires INTEGER NOT NULL);'
+      'CREATE TABLE IF NOT EXISTS refresh_tokens (token TEXT PRIMARY KEY, client_id TEXT NOT NULL, subject TEXT NOT NULL, scope TEXT NOT NULL, expires INTEGER NOT NULL);' +
+      'CREATE TABLE IF NOT EXISTS oidc_states (state_hash TEXT PRIMARY KEY, code_verifier TEXT NOT NULL, nonce TEXT NOT NULL, purpose TEXT NOT NULL, oauth TEXT, expires INTEGER NOT NULL);' +
+      'CREATE TABLE IF NOT EXISTS oidc_identities (issuer TEXT NOT NULL, subject TEXT NOT NULL, user_id TEXT NOT NULL, created_at INTEGER NOT NULL, last_login_at INTEGER NOT NULL, PRIMARY KEY (issuer, subject));' +
+      'CREATE INDEX IF NOT EXISTS oidc_identities_user ON oidc_identities (user_id);'
     );
     try { this.db.exec('ALTER TABLE users ADD COLUMN password_hash TEXT'); } catch { /* already exists */ }
   }
@@ -40,6 +43,40 @@ export class SqliteAuthStore implements AuthStore {
   saveRefreshToken(record: RefreshTokenRecord): void {
     this.db.prepare('INSERT INTO refresh_tokens (token, client_id, subject, scope, expires) VALUES (?, ?, ?, ?, ?)')
       .run(record.token, record.clientId, record.subject, record.scope, record.expires);
+  }
+
+  saveOidcState(record: OidcStateRecord): void {
+    this.db.prepare('INSERT INTO oidc_states (state_hash, code_verifier, nonce, purpose, oauth, expires) VALUES (?, ?, ?, ?, ?, ?)')
+      .run(record.stateHash, record.codeVerifier, record.nonce, record.purpose, record.oauth ?? null, record.expires);
+  }
+
+  consumeOidcState(stateHash: string): OidcStateRecord | undefined {
+    const now = Date.now();
+    this.db.prepare('DELETE FROM oidc_states WHERE expires < ?').run(now);
+    const row = this.db.prepare('SELECT state_hash, code_verifier, nonce, purpose, oauth, expires FROM oidc_states WHERE state_hash = ?')
+      .get(stateHash) as {state_hash:string;code_verifier:string;nonce:string;purpose:string;oauth:string|null;expires:number}|undefined;
+    if (!row) return undefined;
+    // Single use: only the request that actually deletes the row gets it
+    if (this.db.prepare('DELETE FROM oidc_states WHERE state_hash = ?').run(stateHash).changes === 0) return undefined;
+    return {
+      stateHash: row.state_hash, codeVerifier: row.code_verifier, nonce: row.nonce,
+      purpose: row.purpose === 'web' ? 'web' : 'oauth', ...(row.oauth ? { oauth: row.oauth } : {}), expires: row.expires,
+    };
+  }
+
+  findOidcIdentity(issuer: string, subject: string): string | undefined {
+    const row = this.db.prepare('SELECT user_id FROM oidc_identities WHERE issuer = ? AND subject = ?').get(issuer, subject) as {user_id:string}|undefined;
+    return row?.user_id;
+  }
+
+  linkOidcIdentity(issuer: string, subject: string, userId: string): void {
+    const now = Date.now();
+    this.db.prepare('INSERT INTO oidc_identities (issuer, subject, user_id, created_at, last_login_at) VALUES (?, ?, ?, ?, ?)')
+      .run(issuer, subject, userId, now, now);
+  }
+
+  touchOidcIdentity(issuer: string, subject: string): void {
+    this.db.prepare('UPDATE oidc_identities SET last_login_at = ? WHERE issuer = ? AND subject = ?').run(Date.now(), issuer, subject);
   }
 
   getRefreshToken(token: string): RefreshTokenRecord | undefined {
@@ -83,6 +120,8 @@ export class SqliteUserStore implements UserStore {
   }
 
   deleteUser(id: string): boolean {
+    // A deleted user's IdP identities go too, so a later SSO sign-in cannot reach a dangling user id
+    this.db.prepare('DELETE FROM oidc_identities WHERE user_id = ?').run(id);
     return this.db.prepare('DELETE FROM users WHERE id = ?').run(id).changes > 0;
   }
 

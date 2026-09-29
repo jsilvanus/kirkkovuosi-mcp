@@ -129,7 +129,7 @@ On first server start, the configured MCP_DEFAULT_USER_ID is created automatical
         v
     /oauth/authorize
         |
-        +--> sign-in (email + password)
+        +--> sign-in (email + password, or single sign-on via /oidc/login → IdP → /oidc/callback)
         |
         +--> consent (approve / deny, authenticated by a signed login ticket)
         |
@@ -138,6 +138,34 @@ On first server start, the configured MCP_DEFAULT_USER_ID is created automatical
         v
     /oauth/token
 
+
+## Single sign-on (OIDC)
+
+Optional. The server can let users sign in on the OAuth authorize page through an OpenID Connect provider such as authentik. The server is an OIDC **Relying Party** toward the provider and stays the OAuth authorization server and resource server for MCP clients: it never issues ID tokens and publishes no OIDC-provider metadata (no `jwks_uri`, no userinfo endpoint). The `.well-known` documents are unchanged.
+
+When `OIDC_ISSUER` is set, the sign-in page shows a button (`OIDC_BUTTON_LABEL`) next to the email/password form, which keeps working. The button goes to `/oidc/login?oauth=…` (the pending authorization request, validated again), then to the provider, back to `/oidc/callback`, and on to the same consent step a password sign-in reaches. When `OIDC_ISSUER` is unset or empty there is no button and `/oidc/*` answers 404.
+
+| Variable | Meaning |
+|---|---|
+| `OIDC_ISSUER` | Issuer URL exactly as the provider publishes it (authentik: `https://auth.example.org/application/o/<slug>/`, with the trailing slash). Empty = off. `https:` required when `NODE_ENV=production`. |
+| `OIDC_CLIENT_ID` | Required when `OIDC_ISSUER` is set. |
+| `OIDC_CLIENT_SECRET` | Optional. Set = confidential client (`client_secret_basic`); unset = public client. PKCE (S256) is always used. |
+| `OIDC_SCOPES` | Default `openid email profile`; must contain `openid`. |
+| `OIDC_BUTTON_LABEL` | Default `Sign in with single sign-on`. |
+| `OIDC_CREATE_USERS` | `true` = create a local user (no password) for a provider user who has none. Default `false`. |
+| `OIDC_TRUST_EMAIL` | `true` = link to an existing local user by email even when the provider does not say `email_verified: true`. Default `false`. |
+
+Invalid values stop the server at startup. The provider is discovered on the first sign-in, not at startup, so the server starts even when the provider is down.
+
+Which local user signs in: an identity already linked (table `oidc_identities`, keyed by issuer + `sub`) → that user; otherwise a local user with the same email (case-insensitive) when the email is verified or `OIDC_TRUST_EMAIL=true` → linked; otherwise, with `OIDC_CREATE_USERS=true`, a new user (name from `name` / `preferred_username` / email; the email only when verified or trusted) → linked; otherwise an error page ("No account for this sign-in"). Deleting a user (`npm run user -- delete`) also removes its links. The users table has no disabled flag; deleting the user is how access is removed, on both sign-in paths.
+
+The pending sign-in (state hash, PKCE verifier, nonce, authorization request; 10 minutes, single use) is stored in SQLite (`oidc_states`), and the state is also held in an httpOnly cookie `kirkkovuosi_oidc` (`SameSite=Lax`, `Path=/oidc`, `Secure` in production) that must match on the callback. `/oidc/login` and `/oidc/callback` are limited to 30 requests per minute per client IP (in memory). Behind a reverse proxy, the client IP is the proxy's unless Fastify's `trustProxy` is configured, so the limit is then shared.
+
+### authentik
+
+1. Applications → Providers → Create → **OAuth2/OpenID Provider**: client type *Confidential*, redirect URI `<MCP_PUBLIC_URL>/oidc/callback` (strict), and a **signing key** selected so ID tokens are RS256. Scopes: `openid`, `email`, `profile`.
+2. Applications → Create an application for that provider; bind the users or groups allowed to sign in (the application's policy decides who may sign in).
+3. Copy the provider's **OpenID Configuration Issuer** (`https://auth.example.org/application/o/<slug>/`) to `OIDC_ISSUER`, and the client ID and secret to `OIDC_CLIENT_ID` / `OIDC_CLIENT_SECRET`.
 
 ## Development continuation
 
