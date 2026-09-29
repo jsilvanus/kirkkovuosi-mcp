@@ -1,16 +1,10 @@
-import { DatabaseSync } from 'node:sqlite';
-import { mkdirSync } from 'node:fs';
-import { dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { hash } from '@node-rs/argon2';
-import { SqliteUserStore } from '../src/storage/sqlite.js';
+import { SqliteAuthStore, SqliteUserStore } from '../src/storage/sqlite.js';
 
 const dbPath = process.env.STORAGE_PATH ?? './data/app.sqlite';
-mkdirSync(dirname(dbPath), { recursive: true });
-const db = new DatabaseSync(dbPath);
-db.exec('CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, name TEXT NOT NULL, email TEXT UNIQUE, password_hash TEXT, created_at INTEGER NOT NULL);');
-try { db.exec('ALTER TABLE users ADD COLUMN password_hash TEXT'); } catch { /* already exists */ }
-const users = new SqliteUserStore(db);
+// Same schema as the server (users, OIDC identities, ...)
+const users = new SqliteUserStore(new SqliteAuthStore(dbPath).getDatabase());
 
 const [command, ...args] = process.argv.slice(2);
 const value = (flag: string) => { const i = args.indexOf(flag); return i >= 0 ? args[i + 1] : undefined; };

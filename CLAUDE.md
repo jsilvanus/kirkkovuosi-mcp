@@ -14,7 +14,7 @@ npm run build        # TypeScript → dist/
 npm start            # needs .env: MCP_PUBLIC_URL, JWT_SECRET, default user (see .env.example)
 npm run dev          # tsx watch
 npm run typecheck
-npm test             # connector tests on saved responses (no network) + OAuth end to end
+npm test             # connector tests on saved responses (no network) + OAuth and OIDC end to end (fake IdP)
 ```
 
 Node.js ≥ 22.5 (`node:sqlite`).
@@ -25,6 +25,7 @@ Node.js ≥ 22.5 (`node:sqlite`).
 src/connector.ts     KirkkovuosikalenteriConnector — fetch, HTML → text, in-memory cache (6 h)
 src/mcp/server.ts    Tools: kvk_day, kvk_lectionary, kvk_liturgical_colors, kvk_search
 src/oauth/           Authorization server: sign-in + registration page, consent, PKCE, tokens, CIMD
+src/oidc/            Optional OIDC Relying Party (SSO on the sign-in page, openid-client); off unless OIDC_ISSUER is set
 src/app.ts           buildApp() for tests; src/server.ts reads the environment and listens
 test/fixtures/       Saved API responses (trimmed)
 ```

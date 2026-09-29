@@ -94,3 +94,9 @@ Related hardening done at the same time: the OAuth HTML pages send `Cache-Contro
 ## Testing the OAuth flow without a CIMD host
 
 `mountAuthorizationServer` takes `options.fetchClientMetadata` so tests can stub the CIMD fetch (the real one needs a public HTTPS host). `src/app.ts` exports `buildApp()` without listening; `src/server.ts` only reads the environment and listens. `npm test` runs `test/oauth.test.ts`: sign-in → consent → approve → PKCE token exchange → `/mcp` `tools/list` on an ephemeral port with a temporary SQLite database, plus the rejection cases (wrong password, missing/forged ticket, ticket from another request, `/mcp` without a token). Keep this test green when changing the OAuth plumbing.
+
+## Single sign-on: the app is an OIDC Relying Party, not a provider
+
+OIDC only changes *how the user signs in* on `/oauth/authorize`; the MCP authorization server (CIMD, PKCE, consent, tokens) is unchanged. `src/oidc/relying-party.ts` (openid-client v6) sends the browser to the IdP with state, nonce and PKCE, verifies the ID token at `/oidc/callback`, maps the identity to a local user and then calls the same `showConsent` a password sign-in reaches, so the consent page keeps its CSP `form-action` for the client's redirect. Don't add OIDC-provider fields (`jwks_uri`, `userinfo_endpoint`, `id_token_signing_alg_values_supported`) to the `.well-known` documents: this server never issues ID tokens.
+
+The pending sign-in is stored server-side (`oidc_states`, keyed by SHA-256 of the state, single use) and the state is also kept in a `Path=/oidc` cookie that must match the callback's `state` (login CSRF). IdP discovery is lazy and retried after a failure, so startup never depends on the IdP. `test/fake-oidc-provider.ts` is a small IdP for the tests.
